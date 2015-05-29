@@ -36,7 +36,7 @@ namespace rE2MD
                             ushort val = input.ReadUInt16();
                             byte b = (byte)((val >> 10) & 0x1f);
                             byte g = (byte)((val >> 5) & 0x1f);
-                            byte r = (byte)((val) & 0x1f);
+                            byte r = (byte)(val & 0x1f);
 
                             r = (byte)((r << 3) | (r >> 2));
                             g = (byte)((g << 3) | (g >> 2));

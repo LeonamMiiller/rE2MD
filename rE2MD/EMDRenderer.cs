@@ -13,25 +13,42 @@ namespace rE2MD
 {
     class EMDRenderer
     {
+        public struct modelAnimation
+        {
+            public Vector3 translation;
+            public Vector3 speed;
+            public Matrix[] rotation;
+        }
+
         private struct modelObject
         {
             public CustomVertex.PositionNormalTextured[] vertexBuffer;
             public Matrix transform;
         }
 
-        modelObject[] model;
+        private modelObject[] model;
+        public modelAnimation[][][] animations;
 
         private PresentParameters pParams;
         private Device device;
 
-        float scale = 100.0f;
+        private float scale = 100.0f;
 
-        byte[] quadOrder = { 0, 1, 2, 1, 2, 3 };
+        private byte[] quadOrder = { 0, 1, 2, 1, 2, 3 };
 
-        bool keepRendering;
+        private bool keepRendering;
 
         private int texWidth, texHeight;
         private Vector3 minVector, maxVector;
+
+        public Vector2 translation;
+        public Vector2 rotation;
+        public float zoom = -20.0f;
+
+        public int animationGroup = -1;
+        public int animationIndex = 0;
+
+        private int frame = 0;
 
         /// <summary>
         ///     Inicializa a Engine no controle.
@@ -114,23 +131,61 @@ namespace rE2MD
                 sections[index] = input.ReadUInt32();
             }
 
+            /*
+             * Animação 
+             */
+            List<List<List<int>>> animationFrames = new List<List<List<int>>>();
+
+            for (int i = 0; i < 3; i++)
+            {
+                int sectionIndex = 1 + (i * 2);
+
+                List<List<int>> anim = new List<List<int>>();
+                data.Seek(sections[sectionIndex] + 2, SeekOrigin.Begin);
+                ushort length = input.ReadUInt16();
+                data.Seek(sections[sectionIndex], SeekOrigin.Begin);
+
+                while (data.Position - sections[sectionIndex] < length)
+                {
+                    ushort stepCount = input.ReadUInt16();
+                    uint offset = input.ReadUInt16() + sections[sectionIndex];
+                    long dataPosition = data.Position;
+
+                    data.Seek(offset, SeekOrigin.Begin);
+                    List<int> frames = new List<int>();
+                    for (int j = 0; j < stepCount; j++)
+                    {
+                        uint value = input.ReadUInt32();
+                        frames.Add((int)(value & 0xfff));
+                        
+                    }
+
+                    anim.Add(frames);
+                    data.Seek(dataPosition, SeekOrigin.Begin);
+                }
+
+                animationFrames.Add(anim);
+            }
+
             //Carregamento de transformações
+            uint[] skeletonAnimationOffset = new uint[3];
+            ushort[] skeletonAnimationEntryLength = new ushort[3];
+
             data.Seek(sections[2], SeekOrigin.Begin);
-
             uint objectTreeOffset = input.ReadUInt16() + sections[2];
-            uint skeletonAnimationOffset = input.ReadUInt16() + sections[2];
+            skeletonAnimationOffset[0] = input.ReadUInt16() + sections[2];
             ushort objCount = input.ReadUInt16();
-            ushort skeletonAnimationEntryLength = input.ReadUInt16();
+            skeletonAnimationEntryLength[0] = input.ReadUInt16();
 
-            List<Vector3> relativePositions = new List<Vector3>();
+            List<Matrix> relativePositions = new List<Matrix>();
             List<List<byte>> objectTree = new List<List<byte>>();
             for (int i = 0; i < objCount; i++)
             {
                 float x = -(float)input.ReadInt16() / scale;
                 float y = -(float)input.ReadInt16() / scale;
-                float z = (float)input.ReadInt16() / scale;
+                float z = -(float)input.ReadInt16() / scale;
 
-                relativePositions.Add(new Vector3(x, y, z));
+                relativePositions.Add(Matrix.Translation(x, y, z));
             }
 
             data.Seek(objectTreeOffset, SeekOrigin.Begin);
@@ -150,6 +205,20 @@ namespace rE2MD
 
                 data.Seek(dataPosition, SeekOrigin.Begin);
             }
+
+            for (int i = 0; i < 1; i++)
+            {
+                int sectionIndex = 4 + (i * 2);
+                data.Seek(sections[sectionIndex], SeekOrigin.Begin);
+                input.ReadUInt16();
+                skeletonAnimationOffset[i + 1] = input.ReadUInt16() + sections[sectionIndex];
+                input.ReadUInt16();
+                skeletonAnimationEntryLength[i + 1] = input.ReadUInt16();
+            }
+
+            /*
+             * Modelo
+             */
 
             //Carregamento dos objetos
             data.Seek(sections[7], SeekOrigin.Begin);
@@ -193,14 +262,14 @@ namespace rE2MD
                         data.Seek(positionOffsetTriangles + (positionIndex * 8), SeekOrigin.Begin);
                         float vx = -(float)input.ReadInt16() / scale;
                         float vy = -(float)input.ReadInt16() / scale;
-                        float vz = (float)input.ReadInt16() / scale;
+                        float vz = -(float)input.ReadInt16() / scale;
                         Vector3 position = new Vector3(vx, vy, vz);
 
                         //Carrega vetor da normal
                         data.Seek(normalOffsetTriangles + (normalIndex * 8), SeekOrigin.Begin);
                         float nx = -(float)input.ReadInt16() / short.MaxValue;
                         float ny = -(float)input.ReadInt16() / short.MaxValue;
-                        float nz = (float)input.ReadInt16() / short.MaxValue;
+                        float nz = -(float)input.ReadInt16() / short.MaxValue;
                         Vector3 normal = new Vector3(nx, ny, nz);
 
                         //Carrega vetor da textura
@@ -208,8 +277,8 @@ namespace rE2MD
                         ushort texturePage = (ushort)(input.ReadUInt16() & 0x3f);
 
                         data.Seek(texturesOffsetTriangles + (i * 12) + (j * 4), SeekOrigin.Begin);
-                        float u = (float)(input.ReadByte() + (texturePage << 7)) / texWidth;
-                        float v = (float)input.ReadByte() / texHeight;
+                        float u = (float)(input.ReadByte() + (texturePage << 7)) / (texWidth - 1);
+                        float v = (float)input.ReadByte() / (texHeight - 1);
 
                         //Adiciona vetores ao Buffer
                         buffer.Add(new CustomVertex.PositionNormalTextured(position, normal, u, v));
@@ -230,14 +299,14 @@ namespace rE2MD
                         data.Seek(positionOffsetQuads + (positionIndex * 8), SeekOrigin.Begin);
                         float vx = -(float)input.ReadInt16() / scale;
                         float vy = -(float)input.ReadInt16() / scale;
-                        float vz = (float)input.ReadInt16() / scale;
+                        float vz = -(float)input.ReadInt16() / scale;
                         Vector3 position = new Vector3(vx, vy, vz);
 
                         //Carrega vetor da normal
                         data.Seek(normalOffsetQuads + (normalIndex * 8), SeekOrigin.Begin);
                         float nx = -(float)input.ReadInt16() / short.MaxValue;
                         float ny = -(float)input.ReadInt16() / short.MaxValue;
-                        float nz = (float)input.ReadInt16() / short.MaxValue;
+                        float nz = -(float)input.ReadInt16() / short.MaxValue;
                         Vector3 normal = new Vector3(nx, ny, nz);
 
                         //Carrega vetor da textura
@@ -245,8 +314,8 @@ namespace rE2MD
                         ushort texturePage = (ushort)(input.ReadUInt16() & 0x3f);
 
                         data.Seek(texturesOffsetQuads + (i * 16) + (quadOrder[j] * 4), SeekOrigin.Begin);
-                        float u = (float)(input.ReadByte() + (texturePage << 7)) / texWidth;
-                        float v = (float)input.ReadByte() / texHeight;
+                        float u = (float)(input.ReadByte() + (texturePage << 7)) / (texWidth - 1);
+                        float v = (float)input.ReadByte() / (texHeight - 1);
 
                         //Adiciona vetores ao Buffer
                         buffer.Add(new CustomVertex.PositionNormalTextured(position, normal, u, v));
@@ -263,6 +332,100 @@ namespace rE2MD
 
             model = mdl.ToArray();
 
+            //Animação
+            List<List<List<modelAnimation>>> rawAnimation = new List<List<List<modelAnimation>>>();
+            for (int animSection = 0; animSection < animationFrames.Count; animSection++)
+            {
+                List<List<modelAnimation>> sectionAnimation = new List<List<modelAnimation>>();
+                for (int i = 0; i < animationFrames[animSection].Count; i++)
+                {
+                    List<modelAnimation> anim = new List<modelAnimation>();
+                    for (int j = 0; j < animationFrames[animSection][i].Count; j++)
+                    {
+                        data.Seek(skeletonAnimationOffset[animSection] + (animationFrames[animSection][i][j] * skeletonAnimationEntryLength[animSection]), SeekOrigin.Begin);
+
+                        modelAnimation frame = new modelAnimation();
+                        List<Matrix> rotation = new List<Matrix>();
+                        frame.translation = new Vector3(-(float)input.ReadInt16() / scale, -(float)input.ReadInt16() /  scale, (float)input.ReadInt16() / scale);
+                        frame.speed = new Vector3(input.ReadInt16(), input.ReadInt16(), input.ReadInt16());
+
+                        while (rotation.Count < model.Length)
+                        {
+                            /*
+                             * Cada vetor da rotação ocupa 12 bits, o que
+                             * significa que eles ficarão desalinhados, e também
+                             * significa que eu preciso desse código horrível para
+                             * ir lendo até que eles alinhem em 72 bits
+                             */
+                            uint temp = 0;
+
+                            uint x0 = input.ReadByte(); //X0
+                            temp = input.ReadByte();
+                            x0 |= ((temp & 0xf) << 8);
+                            uint y0 = temp >> 4; //Y0
+                            y0 |= ((uint)input.ReadByte() << 4);
+                            uint z0 = input.ReadByte(); //Z0
+                            temp = input.ReadByte();
+                            z0 |= ((temp & 0xf) << 8);
+
+                            rotation.Add(Matrix.RotationZ(cAngle(z0)) * Matrix.RotationY(cAngle(y0)) * Matrix.RotationX(cAngle(x0)));
+                            if (rotation.Count >= model.Length) break;
+
+                            uint x1 = temp >> 4; //X1
+                            x1 |= ((uint)input.ReadByte() << 4);
+                            uint y1 = input.ReadByte(); //Y1
+                            temp = input.ReadByte();
+                            y1 |= ((temp & 0xf) << 8);
+                            uint z1 = temp >> 4; //Z1
+                            z1 |= ((uint)input.ReadByte() << 4);
+
+                            rotation.Add(Matrix.RotationZ(cAngle(z1)) * Matrix.RotationY(cAngle(y1)) * Matrix.RotationX(cAngle(x1)));
+                        }
+
+                        frame.rotation = rotation.ToArray();
+                        anim.Add(frame);
+                    }
+                    sectionAnimation.Add(anim);
+                }
+                rawAnimation.Add(sectionAnimation);
+            }
+
+            animations = new modelAnimation[rawAnimation.Count][][];
+            for (int animSection = 0; animSection < rawAnimation.Count; animSection++)
+            {
+                animations[animSection] = new modelAnimation[rawAnimation[animSection].Count][];
+                for (int i = 0; i < rawAnimation[animSection].Count; i++)
+                {
+                    animations[animSection][i] = new modelAnimation[rawAnimation[animSection][i].Count];
+                    for (int j = 0; j < rawAnimation[animSection][i].Count; j++)
+                    {
+                        animations[animSection][i][j].speed = rawAnimation[animSection][i][j].speed;
+                        animations[animSection][i][j].translation = rawAnimation[animSection][i][j].translation;
+                        animations[animSection][i][j].rotation = new Matrix[rawAnimation[animSection][i][j].rotation.Length];
+                        for (int k = 0; k < rawAnimation[animSection][i][j].rotation.Length; k++)
+                        {
+                            animations[animSection][i][j].rotation[k] = Matrix.Identity;
+                        }
+                    }
+                }
+            }
+
+            for (int animSection = 0; animSection < rawAnimation.Count; animSection++)
+            {
+                for (int i = 0; i < rawAnimation[animSection].Count; i++)
+                {
+                    for (int j = 0; j < rawAnimation[animSection][i].Count; j++)
+                    {
+                        for (int k = 0; k < rawAnimation[animSection][i][j].rotation.Length; k++)
+                        {
+                            bool found = false;
+                            applyAnimationTransform(ref animations[animSection][i][j].rotation[k], 0, k, objectTree, rawAnimation[animSection][i][j].rotation, relativePositions, ref found);
+                        }
+                    }
+                }
+            }
+
+            //Transformação básica do modelo
             for (int entry = 0; entry < relativePositions.Count; entry++)
             {
                 applyTransform(entry, objectTree, relativePositions[entry]);
@@ -278,16 +441,30 @@ namespace rE2MD
             }
         }
 
-        private void applyTransform(int index, List<List<byte>> tree, Vector3 translation)
+        private void applyTransform(int index, List<List<byte>> tree, Matrix mtx)
         {
-            Matrix mtx = Matrix.Identity;
-            mtx.Translate(translation);
             model[index].transform *= mtx;
 
             foreach (byte child in tree[index])
             {
-                applyTransform(child, tree, translation);
+                applyTransform(child, tree, mtx);
             }
+        }
+
+        private void applyAnimationTransform(ref Matrix targetMatrix, int index, int target, List<List<byte>> tree, Matrix[] rotations, List<Matrix> relativePositions, ref bool targetFound)
+        {
+            if (index == target) targetFound = true;
+            foreach (byte child in tree[index])
+            {
+                if (targetFound) break;
+                applyAnimationTransform(ref targetMatrix, child, target, tree, rotations, relativePositions, ref targetFound);
+            }
+            if (targetFound) targetMatrix *= rotations[index] * relativePositions[index];
+        }
+
+        private float cAngle(uint angle)
+        {
+            return ((float)angle / 4096) * ((float)Math.PI * 2);
         }
 
         private void buildBBox(Vector4 vertex)
@@ -307,8 +484,7 @@ namespace rE2MD
         public void render()
         {
             keepRendering = true;
-            float rotX = 0;
-
+            
             while (keepRendering)
             {
                 device.Clear(ClearFlags.Target | ClearFlags.ZBuffer, 0x1f1f1f, 1.0f, 0);
@@ -318,10 +494,19 @@ namespace rE2MD
                 material.Diffuse = Color.White;
                 material.Ambient = Color.White;
                 device.Material = material;
-          
+
+                int index = 0;
                 foreach (modelObject obj in model)
                 {
-                    device.Transform.World = obj.transform * Matrix.Translation((minVector.X + maxVector.X) / 2, -((minVector.Y + maxVector.Y) / 2), 0) * Matrix.RotationY(rotX) * Matrix.Scaling(-0.5f, 0.5f, 0.5f);
+                    device.Transform.World = obj.transform;
+                    if (animationGroup > -1)
+                    {
+                        device.Transform.World = animations[animationGroup][animationIndex][frame].rotation[index];
+                        device.Transform.World *= Matrix.Translation(animations[animationGroup][animationIndex][frame].translation);
+                    }
+                    Matrix rotationMatrix = Matrix.RotationYawPitchRoll(rotation.X / 200.0f, rotation.Y / 200.0f, 0);
+                    Matrix translationMatrix = Matrix.Translation(new Vector3(translation.X / 50.0f, translation.Y / 50.0f, zoom));
+                    device.Transform.World *= rotationMatrix * translationMatrix;
 
                     device.VertexFormat = CustomVertex.PositionNormalTextured.Format;
                     VertexBuffer vertexBuffer = new VertexBuffer(typeof(CustomVertex.PositionNormalTextured), obj.vertexBuffer.Length, device, Usage.None, CustomVertex.PositionNormalTextured.Format, Pool.Managed);
@@ -330,15 +515,29 @@ namespace rE2MD
 
                     device.DrawPrimitives(PrimitiveType.TriangleList, 0, obj.vertexBuffer.Length / 3);
                     vertexBuffer.Dispose();
+
+                    index++;
                 }
 
                 device.EndScene();
                 device.Present();
 
-                if (rotX < Math.PI * 2) rotX = (float)((rotX + 0.08f) %((float)Math.PI * 2)); else rotX = 0;
+                if (animationGroup > -1) frame = (frame + 1) % animations[animationGroup][animationIndex].Length;
+                else if (frame != 0) frame = 0;
 
                 Application.DoEvents();
             }
+        }
+
+        /// <summary>
+        ///     Stops the animation.
+        ///     You must set the Animation Group again to play it.
+        ///     You must call this before changing the Animation Index.
+        /// </summary>
+        public void stopAnimation()
+        {
+            animationGroup = -1;
+            frame = 0;
         }
     }
 }
